@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VoxelCraft Lite</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:Arial,sans-serif;overflow:hidden;background:#87ceeb}
+#hud{position:absolute;top:10px;left:10px;color:#fff;text-shadow:1px 1px 2px #000;z-index:100;background:rgba(0,0,0,.5);padding:10px;border-radius:8px}
+#crosshair{position:absolute;top:50%;left:50%;width:20px;height:20px;margin:-10px 0 0 -10px;border:2px solid #fff;border-radius:50%;pointer-events:none;z-index:99}
+#hotbar{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);display:flex;gap:8px;background:rgba(0,0,0,.7);padding:10px;border-radius:12px}
+.slot{width:60px;height:60px;background:rgba(50,50,50,.9);border:2px solid #666;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:24px;cursor:pointer}
+.slot.active{border-color:#ff0;background:rgba(80,80,80,.9)}
+#msg{position:absolute;top:100px;left:50%;transform:translateX(-50%);color:#fff;font-size:20px;text-shadow:2px 2px 4px #000;text-align:center;pointer-events:none}
+</style>
+</head>
+<body>
+<div id="hud">
+<div>体力: <span id="hp">100</span>/100</div>
+<div>位置: <span id="pos">0,0,0</span></div>
+<div>FPS: <span id="fps">0</span></div>
+<div>ブロック: <span id="blocks">0</span></div>
+</div>
+<div id="crosshair"></div>
+<div id="hotbar"></div>
+<div id="msg"></div>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.150.0/build/three.module.js"}}</script>
+<script type="module">
+import*as THREE from'three';
+
+// 軽量化設定
+const CFG={
+CS:16,        // チャンクサイズ 24→16
+CH:32,        // 高さ 128→32
+RD:2,         // 描画距離 6→2
+PS:5,         // プレイヤー速度
+JF:8,         // ジャンプ力
+G:20          // 重力
+};
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87ceeb);
+scene.fog=new THREE.Fog(0x87ceeb,50,100);
+
+const cam=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,.1,200);
+cam.position.set(0,35,0);
+
+const renderer=new THREE.WebGLRenderer({antialias:false}); // アンチエイリアス無効
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(1); // ピクセル比を1に固定
+document.body.appendChild(renderer.domElement);
+
+// シンプルな光源
+const light=new THREE.DirectionalLight(0xffffff,.8);
+light.position.set(10,20,10);
+scene.add(light);
+scene.add(new THREE.AmbientLight(0x404040));
+
+// ブロックタイプ
+const BT={AIR:0,GRASS:1,DIRT:2,STONE:3,WOOD:4,LEAF:5,WATER:6};
+const BC={
+[BT.GRASS]:0x7cfc00,
+[BT.DIRT]:0x8b4513,
+[BT.STONE]:0x808080,
+[BT.WOOD]:0x8b5a2b,
+[BT.LEAF]:0x228b22,
+[BT.WATER]:0x1e90ff
+};
+
+// シンプルなノイズ関数
+function noise(x,z){
+const X=Math.floor(x)&255;
+const Z=Math.floor(z)&255;
+return(Math.sin(X*12.9898+Z*78.233)*43758.5453123)%1;
+}
+
+function getHeight(x,z){
+const n=noise(x*.05,z*.05);
+return Math.floor(20+n*8);
+}
+
+// 統合メッシュチャンク（軽量化の要）
+class Chunk{
+constructor(cx,cz){
+this.cx=cx;
+this.cz=cz;
+this.blocks=new Uint8Array(CFG.CS*CFG.CH*CFG.CS);
+this.mesh=null;
+this.generate();
+this.buildMesh();
+}
+
+idx(lx,ly,lz){
+if(lx<0||lx>=CFG.CS||ly<0||ly>=CFG.CH||lz<0||lz>=CFG.CS)return-1;
+return ly*CFG.CS*CFG.CS+lz*CFG.CS+lx;
+}
+
+getBlock(lx,ly,lz){
+const i=this.idx(lx,ly,lz);
+return i===-1?BT.AIR:this.blocks[i];
+}
+
+setBlock(lx,ly,lz,type){
+const i=this.idx(lx,ly,lz);
+if(i===-1)return;
+this.blocks[i]=type;
+this.buildMesh();
+}
+
+generate(){
+for(let lx=0;lx<CFG.CS;lx++){
+for(let lz=0;lz<CFG.CS;lz++){
+const wx=this.cx*CFG.CS+lx;
+const wz=this.cz*CFG.CS+lz;
+const h=Math.min(getHeight(wx,wz),CFG.CH-2);
+for(let ly=0;ly<CFG.CH;ly++){
+let t=BT.AIR;
+if(ly===0)t=BT.STONE;
+else if(ly<h-2)t=BT.STONE;
+else if(ly<h)t=BT.DIRT;
+else if(ly===h)t=BT.GRASS;
+this.blocks[this.idx(lx,ly,lz)]=t;
+}
+// 簡易木生成
+if(Math.random()<.02&&h<CFG.CH-8){
+for(let i=1;i<=5;i++)this.blocks[this.idx(lx,h+i,lz)]=BT.WOOD;
+for(let dx=-1;dx<=1;dx++){
+for(let dz=-1;dz<=1;dz++){
+for(let dy=0;dy<=2;dy++){
+const nlx=lx+dx,nlz=lz+dz,nly=h+5+dy;
+const ni=this.idx(nlx,nly,nlz);
+if(ni!==-1&&this.blocks[ni]===BT.AIR)this.blocks[ni]=BT.LEAF;
+}
+}
+}
+}
+}
+}
+}
+
+isVisible(lx,ly,lz){
+if(this.getBlock(lx+1,ly,lz)===BT.AIR)return true;
+if(this.getBlock(lx-1,ly,lz)===BT.AIR)return true;
+if(this.getBlock(lx,ly+1,lz)===BT.AIR)return true;
+if(this.getBlock(lx,ly-1,lz)===BT.AIR)return true;
+if(this.getBlock(lx,ly,lz+1)===BT.AIR)return true;
+if(this.getBlock(lx,ly,lz-1)===BT.AIR)return true;
+return false;
+}
+
+buildMesh(){
+if(this.mesh){
+scene.remove(this.mesh);
+this.mesh.geometry.dispose();
+this.mesh.material.dispose();
+}
+
+const geo=new THREE.BufferGeometry();
+const verts=[],cols=[];
+let vc=0;
+
+for(let ly=0;ly<CFG.CH;ly++){
+for(let lz=0;lz<CFG.CS;lz++){
+for(let lx=0;lx<CFG.CS;lx++){
+const t=this.getBlock(lx,ly,lz);
+if(t===BT.AIR||!this.isVisible(lx,ly,lz))continue;
+
+const x=this.cx*CFG.CS+lx;
+const y=ly;
+const z=this.cz*CFG.CS+lz;
+const c=BC[t]||0x888888;
+const r=(c>>16)/255,g=((c>>8)&255)/255,b=(c&255)/255;
+
+// 上面のみ描画（超軽量化）
+if(this.getBlock(lx,ly+1,lz)===BT.AIR){
+verts.push(x,y+1,z,x+1,y+1,z,x+1,y+1,z+1,x,y+1,z,x+1,y+1,z+1,x,y+1,z+1);
+for(let i=0;i<6;i++)cols.push(r,g,b);
+}
+}
+}
+}
+
+geo.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+geo.setAttribute('color',new THREE.Float32BufferAttribute(cols,3));
+geo.computeVertexNormals();
+
+const mat=new THREE.MeshLambertMaterial({vertexColors:true});
+this.mesh=new THREE.Mesh(geo,mat);
+scene.add(this.mesh);
+return verts.length/3;
+}
+}
+
+const chunks=new Map();
+
+function updateChunks(){
+const pcx=Math.floor(cam.position.x/CFG.CS);
+const pcz=Math.floor(cam.position.z/CFG.CS);
+const needed=new Set();
+
+for(let dz=-CFG.RD;dz<=CFG.RD;dz++){
+for(let dx=-CFG.RD;dx<=CFG.RD;dx++){
+const cx=pcx+dx,cz=pcz+dz;
+const k=`${cx},${cz}`;
+needed.add(k);
+if(!chunks.has(k)){
+const ch=new Chunk(cx,cz);
+chunks.set(k,ch);
+}
+}
+}
+
+for(let[k,ch]of chunks){
+if(!needed.has(k)){
+if(ch.mesh)scene.remove(ch.mesh);
+chunks.delete(k);
+}
+}
+
+let total=0;
+for(let ch of chunks.values()){
+if(ch.mesh)total+=ch.mesh.geometry.attributes.position.count;
+}
+document.getElementById('blocks').textContent=total;
+}
+
+// プレイヤー
+const plr={
+hp:100,
+vel:new THREE.Vector3(),
+onGround:false
+};
+
+plr.hotbar=[
+{type:BT.GRASS,icon:'🌿',count:64},
+{type:BT.DIRT,icon:'🟫',count:64},
+{type:BT.STONE,icon:'🪨',count:64},
+{type:BT.WOOD,icon:'🪵',count:32}
+];
+plr.selected=0;
+
+// UI更新
+function updateHotbar(){
+const hb=document.getElementById('hotbar');
+hb.innerHTML='';
+plr.hotbar.forEach((itm,i)=>{
+const s=document.createElement('div');
+s.className='slot'+(i===plr.selected?' active':'');
+s.textContent=itm.icon;
+s.onclick=()=>{plr.selected=i;updateHotbar()};
+hb.appendChild(s);
+});
+}
+updateHotbar();
+
+// 入力
+const keys={};
+addEventListener('keydown',e=>{
+keys[e.code]=true;
+if(e.code==='Digit1')plr.selected=0;
+if(e.code==='Digit2')plr.selected=1;
+if(e.code==='Digit3')plr.selected=2;
+if(e.code==='Digit4')plr.selected=3;
+updateHotbar();
+});
+addEventListener('keyup',e=>keys[e.code]=false);
+
+let mouseDown={left:false,right:false};
+addEventListener('mousedown',e=>{
+if(e.button===0)mouseDown.left=true;
+if(e.button===2)mouseDown.right=true;
+e.preventDefault();
+});
+addEventListener('mouseup',e=>{
+if(e.button===0)mouseDown.left=false;
+if(e.button===2)mouseDown.right=false;
+});
+addEventListener('contextmenu',e=>e.preventDefault());
+
+let yaw=0,pitch=0;
+addEventListener('mousemove',e=>{
+if(document.pointerLockElement){
+yaw-=e.movementX*.002;
+pitch-=e.movementY*.002;
+pitch=Math.max(-1.5,Math.min(1.5,pitch));
+}
+});
+addEventListener('click',()=>document.body.requestPointerLock());
+
+// レイキャスト
+const raycaster=new THREE.Raycaster();
+let actionCooldown=0;
+
+function handleActions(dt){
+if(actionCooldown>0){actionCooldown-=dt;return}
+if(!mouseDown.left&&!mouseDown.right)return;
+
+const dir=new THREE.Vector3(0,0,-1);
+dir.applyEuler(new THREE.Euler(pitch,yaw,0,'YXZ'));
+raycaster.set(cam.position,dir);
+
+let hit=null,hitDist=999;
+for(let ch of chunks.values()){
+if(!ch.mesh)continue;
+const ints=raycaster.intersectObject(ch.mesh);
+if(ints.length>0&&ints[0].distance<hitDist){
+hit=ints[0];
+hitDist=ints[0].distance;
+}
+}
+
+if(hit&&hitDist<5){
+const p=hit.point.clone().add(hit.face.normal.clone().multiplyScalar(mouseDown.left?-.5:.5));
+const lx=Math.floor(p.x)%CFG.CS;
+const ly=Math.floor(p.y);
+const lz=Math.floor(p.z)%CFG.CS;
+const cx=Math.floor(p.x/CFG.CS);
+const cz=Math.floor(p.z/CFG.CS);
+const ch=chunks.get(`${cx},${cz}`);
+
+if(ch){
+if(mouseDown.left){
+ch.setBlock((lx+CFG.CS)%CFG.CS,ly,(lz+CFG.CS)%CFG.CS,BT.AIR);
+}else if(mouseDown.right){
+const itm=plr.hotbar[plr.selected];
+if(itm&&itm.count>0){
+ch.setBlock((lx+CFG.CS)%CFG.CS,ly,(lz+CFG.CS)%CFG.CS,itm.type);
+itm.count--;
+updateHotbar();
+}
+}
+actionCooldown=.2;
+}
+}
+}
+
+// 移動
+function updatePlayer(dt){
+const dir=new THREE.Vector3(0,0,-1);
+dir.applyEuler(new THREE.Euler(pitch,yaw,0,'YXZ'));
+const fwd=new THREE.Vector3(dir.x,0,dir.z).normalize();
+const right=new THREE.Vector3(-dir.z,0,dir.x).normalize();
+
+let mx=0,mz=0;
+if(keys.KeyW){mx+=fwd.x;mz+=fwd.z}
+if(keys.KeyS){mx-=fwd.x;mz-=fwd.z}
+if(keys.KeyD){mx+=right.x;mz+=right.z}
+if(keys.KeyA){mx-=right.x;mz-=right.z}
+
+const len=Math.sqrt(mx*mx+mz*mz);
+if(len>0){mx/=len;mz/=len}
+
+plr.vel.x=mx*CFG.PS;
+plr.vel.z=mz*CFG.PS;
+plr.vel.y-=CFG.G*dt;
+
+if(cam.position.y+plr.vel.y*dt<2){
+plr.vel.y=0;
+cam.position.y=2;
+plr.onGround=true;
+if(keys.Space&&plr.onGround){
+plr.vel.y=CFG.JF;
+plr.onGround=false;
+}
+}else{
+plr.onGround=false;
+}
+
+cam.position.x+=plr.vel.x*dt;
+cam.position.y+=plr.vel.y*dt;
+cam.position.z+=plr.vel.z*dt;
+cam.rotation.order='YXZ';
+cam.rotation.y=yaw;
+cam.rotation.x=pitch;
+
+document.getElementById('pos').textContent=`${cam.position.x.toFixed(1)},${cam.position.y.toFixed(1)},${cam.position.z.toFixed(1)}`;
+}
+
+// 初期化
+for(let dz=-CFG.RD;dz<=CFG.RD;dz++){
+for(let dx=-CFG.RD;dx<=CFG.RD;dx++){
+const ch=new Chunk(dx,dz);
+chunks.set(`${dx},${dz}`,ch);
+}
+}
+
+document.getElementById('msg').textContent='🎮 VoxelCraft Lite - WASD移動 Space:ジャンプ';
+setTimeout(()=>document.getElementById('msg').textContent='',3000);
+
+// メインループ
+const clock=new THREE.Clock();
+let fc=0,lastFps=Date.now();
+
+function animate(){
+const dt=Math.min(clock.getDelta(),.1);
+
+updateChunks();
+updatePlayer(dt);
+handleActions(dt);
+
+renderer.render(scene,cam);
+
+fc++;
+if(Date.now()-lastFps>=1000){
+document.getElementById('fps').textContent=fc;
+fc=0;
+lastFps=Date.now();
+}
+
+requestAnimationFrame(animate);
+}
+animate();
+
+addEventListener('resize',()=>{
+cam.aspect=innerWidth/innerHeight;
+cam.updateProjectionMatrix();
+renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
